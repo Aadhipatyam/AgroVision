@@ -1,16 +1,19 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { useAuth } from '../contexts/AuthContext';
 import { useVoice } from '../contexts/VoiceContext';
+import { api } from '../lib/api';
 import Navbar from '../components/Navbar';
 import VoiceCommand from '../components/VoiceCommand';
-import { 
-  FileText, 
-  Sprout, 
-  TrendingUp, 
-  Cloud, 
-  MapPin, 
-  Ruler, 
+import Assistant from '../components/Assistant';
+
+import {
+  FileText,
+  Sprout,
+  TrendingUp,
+  Cloud,
+  MapPin,
+  Ruler,
   Wheat,
   AlertCircle,
   Thermometer,
@@ -21,9 +24,31 @@ const Dashboard: React.FC = () => {
   const { user } = useAuth();
   const { speak } = useVoice();
 
+  const [liveWeather, setLiveWeather] = useState<{ temperature: number; humidity: number } | null>(null);
+
+  // Real temperature and humidity for the farmer's own district
+  useEffect(() => {
+    const state = user?.location?.state;
+    const district = user?.location?.district;
+    if (!state) return;
+    let cancelled = false;
+
+    const path = `/weather/${encodeURIComponent(state)}${district ? `/${encodeURIComponent(district)}` : ''}`;
+    api
+      .get<{ current: { temperature: number; humidity: number } }>(path)
+      .then((res) => {
+        if (!cancelled && res.data) setLiveWeather(res.data.current);
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
+
   const stats = [
-    { icon: Thermometer, label: 'Temperature', value: '32°C', color: 'text-orange-600' },
-    { icon: Droplets, label: 'Humidity', value: '65%', color: 'text-blue-600' },
+    { icon: Thermometer, label: 'Temperature', value: liveWeather ? `${Math.round(liveWeather.temperature)}°C` : '--', color: 'text-orange-600' },
+    { icon: Droplets, label: 'Humidity', value: liveWeather ? `${Math.round(liveWeather.humidity)}%` : '--', color: 'text-blue-600' },
     { icon: TrendingUp, label: 'Crop Price', value: '₹2,850/qtl', color: 'text-green-600' },
     { icon: AlertCircle, label: 'Alerts', value: '2 New', color: 'text-red-600' },
   ];
@@ -43,7 +68,7 @@ const Dashboard: React.FC = () => {
     <div className="min-h-screen bg-gradient-to-br from-green-50 to-blue-50">
       <Navbar />
       <VoiceCommand />
-      
+
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <motion.div
           initial={{ opacity: 0, y: 20 }}
@@ -71,7 +96,7 @@ const Dashboard: React.FC = () => {
               <div>
                 <p className="text-sm text-gray-500">Location</p>
                 <p className="font-medium text-gray-900">
-                  {user ? `${user.location.district}, ${user.location.state}` : ''}
+                  {user?.location ? `${user.location.district}, ${user.location.state}` : ''}
                 </p>
               </div>
             </div>
@@ -79,14 +104,14 @@ const Dashboard: React.FC = () => {
               <Ruler className="h-5 w-5 text-gray-400" />
               <div>
                 <p className="text-sm text-gray-500">Farm Size</p>
-                <p className="font-medium text-gray-900">{user?.farmDetails.size}</p>
+                <p className="font-medium text-gray-900">{user?.farmDetails?.size}</p>
               </div>
             </div>
             <div className="flex items-center space-x-3">
               <Wheat className="h-5 w-5 text-gray-400" />
               <div>
                 <p className="text-sm text-gray-500">Primary Crop</p>
-                <p className="font-medium text-gray-900">{user?.farmDetails.primaryCrop}</p>
+                <p className="font-medium text-gray-900">{user?.farmDetails?.primaryCrop}</p>
               </div>
             </div>
           </div>
@@ -143,6 +168,16 @@ const Dashboard: React.FC = () => {
               );
             })}
           </div>
+        </motion.div>
+
+        {/* AI Assistant */}
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5, delay: 0.35 }}
+          className="mb-8"
+        >
+          <Assistant />
         </motion.div>
 
         {/* Recent Alerts */}

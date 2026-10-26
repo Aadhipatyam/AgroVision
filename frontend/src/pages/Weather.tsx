@@ -1,27 +1,64 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { motion } from 'framer-motion';
 import Navbar from '../components/Navbar';
 import { useAuth } from '../contexts/AuthContext';
-import { 
-  Cloud, 
-  Sun, 
-  CloudRain, 
-  Droplets, 
-  Wind, 
+import { api } from '../lib/api';
+import {
+  Cloud,
+  Sun,
+  CloudRain,
+  Droplets,
+  Wind,
   Thermometer,
   Eye,
   Compass,
   AlertTriangle,
-  Calendar,
-  MapPin,
-  Search
+  Calendar
 } from 'lucide-react';
+
+interface WeatherPayload {
+  location: {
+    state: string;
+    district: string;
+    coordinates?: { latitude: number; longitude: number };
+  };
+  current: {
+    temperature: number;
+    humidity: number;
+    pressure: number;
+    windSpeed: number;
+    windDirection: string;
+    visibility: number;
+    uvIndex: number;
+    condition: string;
+  };
+  forecast: {
+    date: string;
+    high: number;
+    low: number;
+    condition: string;
+    precipitationProbability: number;
+  }[];
+  agriculturalAdvisory: {
+    type: string;
+    priority: 'high' | 'medium' | 'low';
+    title: string;
+    description: string;
+  }[];
+  dataSource: { provider: string; lastUpdated: string };
+}
+
+interface Place {
+  name: string;
+  region: string;
+  latitude: number;
+  longitude: number;
+}
 
 const Weather: React.FC = () => {
   const { user } = useAuth();
-  const [selectedState, setSelectedState] = useState('punjab');
-  const [selectedDistrict, setSelectedDistrict] = useState('');
-  const [districts, setDistricts] = useState<string[]>([]);
+  const [selectedState, setSelectedState] = useState('west-bengal');
+  const [pickedDistrict, setPickedDistrict] = useState('');
 
   const states = [
     { id: 'andhra-pradesh', name: 'Andhra Pradesh' },
@@ -91,59 +128,125 @@ const Weather: React.FC = () => {
     'ladakh': ['Leh', 'Kargil', 'Nubra', 'Changthang', 'Zanskar', 'Drass', 'Sankoo', 'Turtuk', 'Diskit', 'Padum']
   };
 
-  useEffect(() => {
-    if (selectedState && stateDistricts[selectedState]) {
-      setDistricts(stateDistricts[selectedState]);
-      setSelectedDistrict(stateDistricts[selectedState][0]);
-    }
-  }, [selectedState]);
-
-  const currentWeather = {
-    temperature: 32,
-    condition: 'Partly Cloudy',
-    humidity: 65,
-    windSpeed: 12,
-    windDirection: 'NE',
-    visibility: 10,
-    pressure: 1013,
-    uvIndex: 8,
-    dewPoint: 24,
-    icon: Cloud
+  // Match the farmer's saved state name (e.g. "West Bengal") to a state id
+  const findStateId = (name?: string) => {
+    if (!name) return undefined;
+    const key = name.trim().toLowerCase().replace(/&/g, 'and').replace(/\s+/g, ' ');
+    return states.find(
+      (s) =>
+        s.name.toLowerCase().replace(/&/g, 'and') === key ||
+        s.id.replace(/-/g, ' ') === key
+    )?.id;
   };
 
-  const forecast = [
-    { day: 'Today', high: 32, low: 24, condition: 'Partly Cloudy', icon: Cloud, rain: 20 },
-    { day: 'Tomorrow', high: 34, low: 26, condition: 'Sunny', icon: Sun, rain: 0 },
-    { day: 'Wednesday', high: 36, low: 28, condition: 'Hot', icon: Sun, rain: 0 },
-    { day: 'Thursday', high: 30, low: 22, condition: 'Rainy', icon: CloudRain, rain: 80 },
-    { day: 'Friday', high: 28, low: 20, condition: 'Rainy', icon: CloudRain, rain: 90 },
-    { day: 'Saturday', high: 31, low: 23, condition: 'Partly Cloudy', icon: Cloud, rain: 30 },
-    { day: 'Sunday', high: 33, low: 25, condition: 'Sunny', icon: Sun, rain: 10 },
-  ];
+  // 1) On load, start with the farmer's own state
+  useEffect(() => {
+    const own = findStateId(user?.location?.state);
+    if (own) setSelectedState(own);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user]);
 
-  const agriculturalAdvisory = [
-    {
-      title: 'Irrigation Advisory',
-      description: 'Heavy rainfall expected in 2 days. Avoid irrigation for next 3 days.',
-      priority: 'high',
-      icon: Droplets,
-      color: 'bg-red-100 text-red-600'
-    },
-    {
-      title: 'Pest Management',
-      description: 'High humidity may increase pest activity. Monitor crops closely.',
-      priority: 'medium',
-      icon: AlertTriangle,
-      color: 'bg-yellow-100 text-yellow-600'
-    },
-    {
-      title: 'Harvesting',
-      description: 'Good weather window for harvesting operations this weekend.',
-      priority: 'low',
-      icon: Calendar,
-      color: 'bg-green-100 text-green-600'
+  // 2) District list for the selected state (the farmer's own district comes first)
+  const mine = user?.location?.district?.trim();
+  const isOwnState = findStateId(user?.location?.state) === selectedState;
+
+  const districts = useMemo(() => {
+    const list = [...(stateDistricts[selectedState] || [])];
+    if (mine && isOwnState && !list.some((d) => d.toLowerCase() === mine.toLowerCase())) {
+      list.unshift(mine);
     }
-  ];
+    return list;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedState, mine, isOwnState]);
+
+  // The district is always one that belongs to the selected state, so the page never
+  // asks for a mismatched pair such as "Tripura / Hyderabad".
+  const selectedDistrict =
+    districts.find((d) => d.toLowerCase() === pickedDistrict.toLowerCase()) ||
+    (mine && isOwnState ? districts.find((d) => d.toLowerCase() === mine.toLowerCase()) : undefined) ||
+    districts[0] ||
+    '';
+
+  // 3) Load live weather from the backend
+  const [weather, setWeather] = useState<WeatherPayload | null>(null);
+  const [wLoading, setWLoading] = useState(false);
+  const [wError, setWError] = useState('');
+  const [stale, setStale] = useState(false);
+  const [place, setPlace] = useState<Place | null>(null);
+
+  useEffect(() => {
+    if (!selectedState || !selectedDistrict) return;
+    let cancelled = false;
+    setWLoading(true);
+    setWError('');
+
+    api
+      .get<WeatherPayload>(
+        `/weather/${encodeURIComponent(selectedState)}/${encodeURIComponent(selectedDistrict)}`
+      )
+      .then((res) => {
+        if (cancelled) return;
+        setWeather(res.data ?? null);
+        setStale(Boolean(res.stale));
+        setPlace((res.place as Place | null | undefined) ?? null);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setWeather(null);
+        setPlace(null);
+        setWError(err.message || 'Could not load weather');
+      })
+      .finally(() => {
+        if (!cancelled) setWLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedState, selectedDistrict]);
+
+  const iconFor = (condition: string) => {
+    const c = (condition || '').toLowerCase();
+    if (c.includes('rain') || c.includes('drizzle') || c.includes('thunder')) return CloudRain;
+    if (c === 'clear') return Sun;
+    return Cloud;
+  };
+
+  const w = weather?.current;
+
+  const currentWeather = {
+    temperature: w ? Math.round(w.temperature) : '--',
+    condition: w?.condition ?? '--',
+    humidity: w ? Math.round(w.humidity) : '--',
+    windSpeed: w ? Math.round(w.windSpeed) : '--',
+    windDirection: w?.windDirection ?? '',
+    visibility: w ? Math.round(w.visibility / 1000) : '--',
+    pressure: w?.pressure ?? '--',
+    uvIndex: w?.uvIndex ?? '--',
+    icon: iconFor(w?.condition ?? ''),
+  };
+
+  const forecast = (weather?.forecast ?? []).map((d, i) => ({
+    day: i === 0 ? 'Today' : new Date(d.date).toLocaleDateString('en-IN', { weekday: 'short' }),
+    high: Math.round(d.high),
+    low: Math.round(d.low),
+    condition: d.condition,
+    icon: iconFor(d.condition),
+    rain: d.precipitationProbability,
+  }));
+
+  const agriculturalAdvisory = (weather?.agriculturalAdvisory ?? []).map((a) => ({
+    title: a.title,
+    description: a.description,
+    priority: a.priority,
+    icon: a.type === 'irrigation' ? Droplets : a.type === 'pest' ? AlertTriangle : Calendar,
+    color:
+      a.priority === 'high'
+        ? 'bg-red-100 text-red-600'
+        : a.priority === 'medium'
+        ? 'bg-yellow-100 text-yellow-600'
+        : 'bg-green-100 text-green-600',
+  }));
 
   const weatherMetrics = [
     { label: 'Temperature', value: `${currentWeather.temperature}°C`, icon: Thermometer },
@@ -159,7 +262,7 @@ const Weather: React.FC = () => {
   return (
     <div className="min-h-screen bg-gradient-to-br from-green-50 to-blue-50">
       <Navbar />
-      
+
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <motion.div
           initial={{ opacity: 0, y: 20 }}
@@ -188,7 +291,10 @@ const Weather: React.FC = () => {
               <label className="block text-sm font-medium text-gray-700 mb-2">State</label>
               <select
                 value={selectedState}
-                onChange={(e) => setSelectedState(e.target.value)}
+                onChange={(e) => {
+                  setSelectedState(e.target.value);
+                  setPickedDistrict('');
+                }}
                 className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
               >
                 {states.map((state) => (
@@ -202,7 +308,7 @@ const Weather: React.FC = () => {
               <label className="block text-sm font-medium text-gray-700 mb-2">District</label>
               <select
                 value={selectedDistrict}
-                onChange={(e) => setSelectedDistrict(e.target.value)}
+                onChange={(e) => setPickedDistrict(e.target.value)}
                 className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
                 disabled={!districts.length}
               >
@@ -215,6 +321,20 @@ const Weather: React.FC = () => {
             </div>
           </div>
         </motion.div>
+
+        {wLoading && <p className="text-sm text-gray-600 mb-4">Loading weather…</p>}
+        {wError && (
+          <div className="mb-4 p-3 bg-red-50 text-red-700 rounded-lg text-sm">{wError}</div>
+        )}
+        {weather && !wLoading && (
+          <p className="text-xs text-gray-500 mb-4">
+            Source: {weather.dataSource.provider} · Updated{' '}
+            {new Date(weather.dataSource.lastUpdated).toLocaleString('en-IN')}
+            {stale && ' · Showing last saved data (live service unavailable)'}
+            {place &&
+              ` · Showing weather for ${place.name}${place.region ? `, ${place.region}` : ''} (${place.latitude.toFixed(2)}, ${place.longitude.toFixed(2)})`}
+          </p>
+        )}
 
         {/* Current Weather */}
         <motion.div
@@ -288,6 +408,9 @@ const Weather: React.FC = () => {
           className="bg-white rounded-xl shadow-lg p-6"
         >
           <h2 className="text-xl font-semibold text-gray-900 mb-6">Agricultural Advisory</h2>
+          {agriculturalAdvisory.length === 0 && !wLoading && (
+            <p className="text-sm text-gray-500">No special advisories for the next few days.</p>
+          )}
           <div className="space-y-4">
             {agriculturalAdvisory.map((advisory, index) => {
               const Icon = advisory.icon;
